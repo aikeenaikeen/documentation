@@ -46,159 +46,63 @@
 
 Admin Frontend взаимодействует с Backend через REST API:
 
-#### 🔐 Аутентификация
-- `POST /api/auth/login` — Вход (получение JWT токенов)
-- `POST /api/auth/refresh` — Обновление access токена
+#### API эндпоинты
 
-**Механизм:**
-- Request interceptor автоматически добавляет `Authorization: Bearer ${token}` к каждому запросу
-- Response interceptor перехватывает 401 и автоматически обновляет токен через refresh endpoint
-- Токены хранятся в localStorage
+**Аутентификация:**
+- `POST /api/auth/login` → JWT токены
+- `POST /api/auth/refresh` → обновление токена
 
-#### 👥 Сотрудники
-- `GET /api/employees` — Список всех сотрудников
-- `POST /api/employees` — Создать сотрудника (с загрузкой фото через FormData)
-- `PUT /api/employees/:id` — Обновить сотрудника
-- `DELETE /api/employees/:id` — Удалить сотрудника
+**CRUD операции:**
+- `/api/employees` — сотрудники (GET, POST, PUT, DELETE)
+- `/api/cameras` — камеры (GET, POST, PUT, DELETE)
+- `/api/companies` — компании (GET, POST, PUT, DELETE) — только SUPERADMIN
 
-#### 📹 Камеры
-- `GET /api/cameras` — Список камер
-- `POST /api/cameras` — Создать камеру (с RTSP данными)
-- `PUT /api/cameras/:id` — Обновить камеру
-- `DELETE /api/cameras/:id` — Удалить камеру
-- `POST /api/cameras/:id/test` — Тест подключения к камере
-- `GET /api/cameras/:id/stream-url` — Получить URL MJPEG потока
+**Данные:**
+- `GET /api/presence` — присутствие
+- `GET /api/events` — события (фильтры + пагинация)
+- `GET /api/statistics` — статистика
 
-#### 📊 Данные
-- `GET /api/presence` — Текущий список присутствующих
-- `GET /api/events` — История событий распознавания (с фильтрами)
-- `GET /api/statistics` — Статистика и аналитика
+**Особое:**
+- `POST /api/cameras/:id/test` — тест подключения
+- `GET /api/cameras/:id/stream-url` → URL MJPEG потока
 
-#### 🏢 Компании (только SUPERADMIN)
-- `GET /api/companies` — Список компаний
-- `POST /api/companies` — Создать компанию
-- `PUT /api/companies/:id` — Обновить
-- `DELETE /api/companies/:id` — Удалить
+**Механизм:** Axios interceptors (авто-добавление токена, авто-refresh при 401)
 
 ---
 
-### 2️⃣ Camera Gateway
+### 2️⃣ Camera Gateway (порт 4000)
 
-**Назначение:** Proxy для получения видео потоков с IP-камер
+**Получение MJPEG потока:**
 
-#### Получение MJPEG потока
-
-```typescript
-// 1. Запрашиваем URL потока у Backend
-const response = await apiClient.get(`/api/cameras/${cameraId}/stream-url`)
-
-// 2. Backend возвращает URL Camera Gateway
-// { mjpegUrl: "http://localhost:4000/stream/1" }
-
-// 3. Отображаем поток в <img>
-<img :src="response.data.mjpegUrl" />
-```
-
-**Порядок работы:**
-1. Admin запрашивает stream URL у Backend API
-2. Backend возвращает URL Camera Gateway
-3. Camera Gateway проксирует RTSP поток с камеры в MJPEG
-4. Admin отображает MJPEG поток в браузере
+1. Admin → Backend: `GET /api/cameras/:id/stream-url`
+2. Backend → Admin: `{ mjpegUrl: "http://localhost:4000/streams/1.mjpg" }`
+3. Admin отображает: `<img :src="mjpegUrl" />`
 
 ---
 
-### 3️⃣ Recognition Service
+### 3️⃣ Recognition Service (порт 5000+)
 
-**Назначение:** Видео поток с наложением результатов распознавания (рамки, имена)
+**Поток с распознаванием:**
 
-#### Получение потока с распознаванием
-
-```typescript
-// Прямое подключение к Recognition Service
-// Порт = 5000 + cameraId
-const streamUrl = `http://localhost:${5000 + cameraId}/video_feed`
-
-<img :src="streamUrl" />
-```
-
-**Особенности:**
-- Каждая камера имеет свой экземпляр Recognition Service на отдельном порту
-- Порт вычисляется как: `5000 + cameraId`
-- Поток уже содержит overlays с результатами распознавания
-- Если сервис недоступен — показывается ошибка
+Прямое подключение: `http://localhost:${5000 + cameraId}/video_feed`
 
 **Пример:**
-- Камера ID=1 → `http://localhost:5001/video_feed`
-- Камера ID=2 → `http://localhost:5002/video_feed`
-- Камера ID=3 → `http://localhost:5003/video_feed`
+- Камера ID=1 → порт 5001
+- Камера ID=2 → порт 5002
+- Камера ID=3 → порт 5003
+
+**Отображение:** `<img :src="streamUrl" />`
 
 ---
 
-### 4️⃣ WebSocket (Real-time обновления)
+### 4️⃣ WebSocket (Backend → Admin)
 
-**Подключение:** Socket.IO к Backend
+**Socket.IO события:**
+- `event:created` — новое событие распознавания
+- `employee:created` — новый сотрудник
+- `employee:updated` — обновление сотрудника
 
-```typescript
-import { io } from 'socket.io-client'
-
-const socket = io('http://localhost:3000')
-
-// События от Backend
-socket.on('newEvent', (event) => {
-  // Новое событие распознавания
-  // Автоматически добавляется в таблицу Events
-})
-
-socket.on('presenceUpdate', (data) => {
-  // Изменение статуса присутствия сотрудника
-  // Обновляется страница Presence
-})
-
-socket.on('cameraStatus', (data) => {
-  // Изменение статуса камеры (вкл/выкл)
-})
-```
-
-**Что обновляется в real-time:**
-- ✅ Новые события распознавания
-- ✅ Изменение присутствия сотрудников
-- ✅ Статусы камер
-- ✅ Счетчики на Dashboard
-
----
-
-## ⚙️ Конфигурация
-
-### Переменные окружения (.env)
-
-```bash
-VITE_API_BASE_URL=http://localhost:3000
-```
-
-### Vite Proxy (для разработки)
-
-```typescript
-server: {
-  port: 8080,
-  proxy: {
-    '/api': { target: 'http://localhost:3000' },
-    '/uploads': { target: 'http://localhost:3000' }
-  }
-}
-```
-
----
-
-## 🚀 Запуск
-
-```bash
-# Development
-npm run dev
-# → http://localhost:8080
-
-# Production build
-npm run build
-```
+**Обновляется в real-time:** Dashboard, Events, Presence
 
 ---
 
@@ -248,4 +152,4 @@ npm run build
 
 ---
 
-*Документация актуальна на: декабрь 2024*
+*Документация актуальна на: декабрь 2025*
