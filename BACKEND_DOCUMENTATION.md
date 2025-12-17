@@ -114,67 +114,6 @@ Admin → `POST /api/cameras/:id/test` → Backend:
 
 ---
 
-## ⚙️ Конфигурация
-
-### Переменные окружения (.env)
-
-```bash
-# Server
-PORT=3000
-NODE_ENV=development
-
-# Database
-DATABASE_URL=postgresql://user:password@localhost:5432/attendance
-
-# JWT
-JWT_ACCESS_SECRET=change-me-access-secret
-JWT_REFRESH_SECRET=change-me-refresh-secret
-JWT_ACCESS_EXPIRY=15m
-JWT_REFRESH_EXPIRY=7d
-
-# Encryption (для паролей камер)
-ENCRYPTION_KEY=change-me-32-char-encryption-key
-
-# File uploads
-UPLOADS_DIR=./uploads
-MAX_FILE_SIZE=10485760  # 10MB
-
-# CORS
-CORS_ORIGIN=*
-
-# Socket.IO
-SOCKET_PATH=/ws
-
-# Camera Gateway
-CAMERA_GATEWAY_PUBLIC_URL=http://localhost:4000
-CAMERA_GATEWAY_INTERNAL_URL=http://camera-gateway:4000
-
-# Event deduplication
-EVENT_DEDUPLICATION_WINDOW_MS=60000  # 60 секунд
-```
-
----
-
-## 🚀 Запуск
-
-```bash
-# Development
-npm run dev
-# → http://localhost:3000
-
-# Production build
-npm run build
-npm start
-
-# Prisma migrations
-npm run prisma:migrate
-
-# Database seed (тестовые данные)
-npm run prisma:seed
-```
-
----
-
 ## 📊 Диаграмма взаимодействия
 
 ```
@@ -235,5 +174,5 @@ npm run prisma:seed
 
 ---
 
-*Документация актуальна на: декабрь 2024*
+*Документация актуальна на: декабрь 2025*
 
