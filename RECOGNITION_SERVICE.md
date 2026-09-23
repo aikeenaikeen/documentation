@@ -1,247 +1,33 @@
-# 📚 Recognition Service — Документация
+# Recognition Service
 
-## 🎯 Описание
+Актуализировано 2026-09-23 по `recognition_service/main.py`, `video_loop.py`, `streaming_api.py`, `management_api.py` и конфигурации Compose.
 
-**Recognition Service** — Python сервис для распознавания лиц в реальном времени. Обрабатывает видео с камер, распознает сотрудников, отправляет события в Backend.
+`recognition_service` — Python ML-сервис для всех компаний и камер. Он получает через backend конфигурацию и MJPEG URL Camera Gateway, определяет сотрудников и их активности, а результаты отправляет обратно в backend. Training запущен в отдельном контейнере `recognition-training-worker` (`TRAINING_ONLY=1`).
 
-## 🛠️ Технологический стек
+## Runtime pipeline
 
-- **Python 3.10+**
-- **InsightFace** — распознавание лиц (buffalo_l модель)
-- **OpenCV** — обработка видео
-- **Flask** — HTTP сервер для видео стримов
-- **NumPy** — математика
-- **Requests** — HTTP клиент
+1. `GlobalCameraManager` получает активные камеры и конфигурацию через HMAC API backend, запускает camera workers и обновляет данные.
+2. Worker читает MJPEG поток Gateway. InsightFace распознаёт лицо; YOLO находит человека, связывает лицо с person track и готовит crop сотрудника.
+3. По назначенным сотруднику активностям action model обрабатывает буфер person crops. Object cues мягко корректируют score; затем применяются сглаживание и разрешение конфликтующих кандидатов.
+4. Кандидат, прошедший `startThreshold`, может проверяться Qwen3-VL через локальный Ollama. Политика для неопределённого ответа и ошибки задаётся recognition config; при отключённом verifier этот шаг пропускается.
+5. Подтверждённые результаты попадают в `ActivityIntervalAggregator`, затем в backend как интервалы и evidence. При `ACTIVITY_SHADOW_MODE=1` модели и capture работают, но интервалы и события наружу не публикуются.
 
----
+Обучение VideoMAE и inference используют person crops, а не полный кадр. Загруженные training assets и ONNX модели хранятся через backend. При `CAPTURE_ENABLED=1` сервис также сохраняет клипы с потока в общий `capture-clips`; Admin размечает их через backend.
 
-## 🔗 Взаимодействие с другими сервисами
+## HTTP интерфейсы
 
-### 1️⃣ Backend API → Recognition Service
+| Порт | Маршруты | Назначение |
+| --- | --- | --- |
+| `5001` (`PORT`) | `/video_feed?cameraId=:id`, `/cameras/:id/video_feed`, `/health`, `/cameras` | Единый streaming API для всех камер |
+| `7001` (`MANAGEMENT_PORT`) | `/health`, `/metrics`, `/object-classes` | Состояние inference и GPU |
+| `7001` training worker | `/train`, `/preview-training-samples`, `/health` | Служебное обучение с подписанными запросами |
 
-#### Загрузка списка сотрудников
+Порт `5000 + cameraId` и обязательный `COMPANY_SLUG` относятся к старой схеме. Для диагностики inference используйте management `/health`: он показывает режим, состояние camera manager и AI device.
 
-`GET /api/employees`
+## Конфигурация и зависимости
 
-**Когда:** При запуске + каждые 5 минут (настраивается)
+- Для NVIDIA production применяйте GPU override: `AI_DEVICE=cuda`, `TRAINING_PERSON_DET_DEVICE=cuda`, `ALLOW_PERSON_DET_CPU_FALLBACK=0`, `ALLOW_OBJECT_CUE_CPU_FALLBACK=0`, `ALLOW_FACE_CPU_FALLBACK=0`, `ALLOW_LEGACY_FACE_ONLY_MODE=0`.
+- Пороги активностей, назначения и VLM политика приходят из company/activity config backend. Env задаёт инфраструктурные параметры: backend URL, HMAC secret, Redis, GPU, адрес/модель Ollama, capture.
+- Qwen3-VL через Ollama — дополнительный verifier после action threshold. Compose сервис `vlm-verifier` находится в профиле `vlm`; наличие GPU override само по себе его не запускает.
 
-**Ответ:**
-```json
-[
-  {
-    "id": 1,
-    "name": "Иван Иванов",
-    "role": "Менеджер",
-    "photoUrl": "/uploads/employees/photo-123.jpg"
-  }
-]
-```
-
-**Что делает Recognition Service:**
-1. Загружает фото сотрудников по URL
-2. Извлекает face embeddings (512D вектора) через InsightFace
-3. Кэширует в `face_encodings_cache.pkl` (для быстрого рестарта)
-4. Использует для распознавания в реальном времени
-
----
-
-#### Загрузка списка камер компании
-
-`GET /api/cameras/public/{companySlug}/cameras`
-
-**Когда:** При запуске + каждые 60 секунд (настраивается)
-
-**Ответ:**
-```json
-[
-  {
-    "id": 1,
-    "name": "Вход главный",
-    "location": "1 этаж",
-    "streamUrl": "rtsp://user:pass@192.168.1.100:554/path"
-  }
-]
-```
-
-**Multi-Camera режим:**
-- MultiCameraManager периодически синхронизируется с Backend
-- Автоматически запускает новые камеры
-- Автоматически останавливает удаленные камеры
-- Один поток на камеру
-
----
-
-### 2️⃣ Recognition Service → Backend API
-
-#### Отправка событий распознавания
-
-`POST /api/events`
-
-**Когда:** При распознавании сотрудника
-
-**Payload:**
-```json
-{
-  "employeeId": 123,
-  "type": "IN",  // или "OUT"
-  "cameraId": 1,
-  "timestamp": "2025-12-17T10:30:00Z"
-}
-```
-
-**Логика присутствия:**
-- **IN событие:** сотрудник стабильно присутствует > 1 секунды
-- **OUT событие:** сотрудник отсутствует > 10 секунд
-
-**Anti-spam:**
-- Backend дедуплицирует события (60 сек окно)
-- Recognition Service также имеет cooldown логику
-
----
-
-### 3️⃣ IP Камеры → Recognition Service
-
-#### Чтение видео потоков
-
-Recognition Service читает RTSP напрямую с IP-камер:
-
-```python
-# Подключение к RTSP
-rtsp_url = "rtsp://username:password@192.168.1.100:554/ISAPI/Streaming/Channels/101"
-cap = cv2.VideoCapture(rtsp_url)
-```
-
-**Параметры:**
-- Frame skip: обработка каждого 3-го кадра (для производительности)
-- RTSP transport: TCP (для стабильности)
-- Автоматический реконнект при обрыве соединения
-
-**Альтернатива:** Можно читать MJPEG от Camera Gateway (через streamUrl)
-
----
-
-### 4️⃣ Recognition Service → Admin Frontend
-
-#### Flask видео сервер
-
-Каждая камера предоставляет HTTP endpoint для просмотра видео с распознаванием.
-
-**Endpoint:** `GET /video_feed`
-
-**Порт:** `5000 + cameraId`
-
-**Примеры:**
-- Камера ID=1 → `http://localhost:5001/video_feed`
-- Камера ID=2 → `http://localhost:5002/video_feed`
-- Камера ID=3 → `http://localhost:5003/video_feed`
-
-**Что отображается:**
-- Bounding boxes вокруг лиц
-- Имена распознанных сотрудников
-- Confidence score
-- FPS счетчик
-
-**Формат:** MJPEG stream (`multipart/x-mixed-replace`)
-
-**Использование в Admin:**
-```html
-<img :src="`http://localhost:${5000 + cameraId}/video_feed`" />
-```
-
----
-
-## 📊 Диаграмма взаимодействия
-
-```
-┌──────────────────────────────────────────────┐
-│   Recognition Service (Python, порт 5000+)   │
-│                                              │
-│  ┌────────────────────────────────────────┐ │
-│  │  MultiCameraManager                    │ │
-│  │  • Синхронизация камер с Backend       │ │
-│  │  • Один поток на камеру                │ │
-│  └────────────────────────────────────────┘ │
-│                                              │
-│  ┌────────────────────────────────────────┐ │
-│  │  Video Loop (per camera)               │ │
-│  │  1. Чтение кадра (OpenCV)              │ │
-│  │  2. Детекция лиц (InsightFace)         │ │
-│  │  3. Извлечение embeddings              │ │
-│  │  4. Matching с базой сотрудников       │ │
-│  │  5. Tracking (FaceTracker)             │ │
-│  │  6. Presence logic (IN/OUT)            │ │
-│  │  7. Отправка событий в Backend         │ │
-│  └────────────────────────────────────────┘ │
-│                                              │
-│  ┌────────────────────────────────────────┐ │
-│  │  Flask Server (per camera)             │ │
-│  │  GET /video_feed → MJPEG с overlays    │ │
-│  └────────────────────────────────────────┘ │
-└──────┬───────────────┬───────────────────────┘
-       │               │
-       │               │ GET /api/employees
-       │               │ GET /api/cameras/public/{slug}/cameras
-       │               │ POST /api/events
-       │               │
-       ▼               ▼
-┌─────────────┐  ┌──────────┐
-│  IP Камеры  │  │ Backend  │
-│             │  │   API    │
-│ RTSP поток  │  │          │
-└─────────────┘  └──────────┘
-       │               │
-       │               │ MJPEG stream (видео + overlays)
-       │               ▼
-       │        ┌──────────────┐
-       │        │    Admin     │
-       │        │  Frontend    │
-       └────────┴──────────────┘
-```
-
----
-
-## 🧠 Pipeline распознавания
-
-**Шаг 1:** Чтение кадра (OpenCV)  
-**Шаг 2:** Детекция лиц (InsightFace, buffalo_l)  
-**Шаг 3:** Извлечение embeddings (512D векторы)  
-**Шаг 4:** Matching с базой (cosine similarity, threshold 0.2)  
-**Шаг 5:** Tracking (FaceTracker, IoU matching)  
-**Шаг 6:** Presence logic:
-- IN: стабильное присутствие > 1 сек
-- OUT: отсутствие > 10 сек
-
-**Шаг 7:** Отправка событий в Backend (POST /api/events)
-
----
-
-## 💾 Кэширование
-
-**Файл:** `face_encodings_cache.pkl`
-
-**Содержит:**
-- Face embeddings всех сотрудников
-- Employee IDs
-- Hash списка сотрудников (для валидации)
-- Timestamp
-
-**Логика:**
-- При запуске проверяет кэш
-- Если hash совпадает → использует кэш (быстро)
-- Если hash изменился → перезагружает все фото
-- При добавлении/удалении сотрудника → кэш инвалидируется
-
----
-
-## 📋 Требуемые зависимости
-
-| Сервис | Обязательный |
-|--------|--------------|
-| **Backend API** | ✅ Да |
-| **IP Камеры (RTSP)** | ✅ Да |
-| **InsightFace модели** | ✅ Да (авто-загрузка) |
-
----
-
-*Документация актуальна на: декабрь 2025*
-
+Исходники и настройки: [main.py](https://github.com/aikeenaikeen/recognition_service/blob/main/main.py), [video_loop.py](https://github.com/aikeenaikeen/recognition_service/blob/main/video_loop.py), [streaming_api.py](https://github.com/aikeenaikeen/recognition_service/blob/main/streaming_api.py), [management_api.py](https://github.com/aikeenaikeen/recognition_service/blob/main/management_api.py), [ENV.md](https://github.com/aikeenaikeen/recognition_service/blob/main/ENV.md).

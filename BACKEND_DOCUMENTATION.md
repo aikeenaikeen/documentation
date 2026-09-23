@@ -1,178 +1,43 @@
-# 📚 Backend API — Документация
+# Backend API
 
-## 🎯 Описание
+Актуализировано 2026-09-23 по `backend/src/index.ts`, маршрутам `backend/src/modules/` и `backend/prisma/schema.prisma`.
 
-**Backend API** — центральный сервер системы. Хранит данные (PostgreSQL), предоставляет REST API и WebSocket.
+`backend` — Express + TypeScript API на порту `3000`. Prisma хранит данные в PostgreSQL, Redis/BullMQ обслуживает очереди и межсервисные сигналы, Socket.IO отправляет обновления клиентам. Загруженные фотографии, видео для обучения, модели и evidence лежат в `uploads`, а не в Git.
 
-## 🛠️ Технологический стек
+## Данные
 
-- **Node.js + TypeScript + Express + Prisma ORM**
-- **JWT** (access + refresh), **bcrypt**, **AES-256**
-- **Socket.IO** — real-time
-- **Multer + Sharp** — загрузка фото
+- Организации и доступ: `Company`, `User`, `Employee`, `EmployeePhoto`, `Camera`.
+- Посещаемость: `Observation`, `Event`, `EmployeePresence`.
+- Активности: `Activity`, `CompanyActivity`, назначения сотрудникам, `ActivityResult`, `ActivityInterval`.
+- Модели и обучение: `ModelVersion`, `TrainingAsset`, `TrainingAnnotation`, `TrainingJob`; также classifier groups и их версии моделей и задания.
+- Разметка реальных фрагментов потока: `CaptureClip` с привязкой к компании, камере и активности.
 
-## 📊 База данных
+## Основные API
 
-| Таблица | Описание |
-|---------|----------|
-| **Company** | Компании |
-| **User** | Пользователи (SUPERADMIN, COMPANY_ADMIN, USER) |
-| **Employee** | Сотрудники + фото |
-| **Camera** | IP-камеры (RTSP, пароли AES-256) |
-| **Event** | События распознавания (IN/OUT) |
+| Группа | Назначение |
+| --- | --- |
+| `/api/auth` | Вход и обновление JWT |
+| `/api/companies`, `/api/users`, `/api/employees`, `/api/cameras` | Справочники и настройки |
+| `/api/observations`, `/api/events`, `/api/presence`, `/api/statistics` | Наблюдения, посещаемость и сводки |
+| `/api/activities`, `/api/company-activities`, `/api/activity-results`, `/api/activity-intervals` | Активности и результаты |
+| `/api/classifier-groups`, `/api/company-classifier-groups`, `/api/classifier-group-results` | Группы классификаторов |
+| `/api/training-assets`, `/api/training-jobs`, `/api/classifier-group-training-jobs`, `/api/models` | Данные обучения, задания и версии моделей |
+| `/api/captures` | Индекс клипов, кадры и разметка |
+| `/api/recognition` | Конфигурация и задания для ML-сервиса |
+| `/api/health` | Проверка состояния API |
 
----
+Маршруты пользователя защищены JWT и проверками роли/компании. Вызовы Recognition к служебным маршрутам подписываются HMAC (`X-Signature`, `X-Timestamp`, `X-Request-Id`); Redis предотвращает повторное использование request ID. Конкретные методы и ограничения смотрите в файлах routes, не выводите их из названия группы.
 
-## 🔗 Взаимодействие с другими сервисами
+## Потоки данных
 
-### 1️⃣ Admin Frontend → Backend
+1. Admin работает с backend через REST и Socket.IO.
+2. Backend выдаёт URL потока `/streams/:id.mjpg?token=...` и вызывает Camera Gateway для проверки RTSP и перезапуска потока. Gateway сам читает камеры из PostgreSQL.
+3. Recognition получает через подписанный API список камер, URL MJPEG, конфигурацию компании, сотрудников, назначения активностей и моделей.
+4. Recognition отправляет наблюдения, события, интервалы и результаты в backend. Backend сохраняет их и публикует нужные realtime события в Admin.
+5. Backend передаёт задания обучения отдельному `recognition-training-worker`; worker сообщает progress и загружает артефакты модели через служебный API.
 
-#### Аутентификация
-- `POST /api/auth/login` → `{ accessToken, refreshToken, user }`
-- `POST /api/auth/refresh` → обновление access токена
+## Хранение и конфигурация
 
-**JWT:** Access (15 мин), Refresh (7 дней)
+Для production `BACKEND_UPLOADS_MOUNT` должен указывать на постоянный bind mount вне репозитория `backend`. База и `uploads` требуют резервной копии перед деплоем. Список переменных находится в [backend/ENV.md](https://github.com/aikeenaikeen/backend/blob/main/ENV.md) и [infra/ENV.md](https://github.com/aikeenaikeen/infra/blob/main/ENV.md).
 
-#### Сотрудники
-- `GET /api/employees` — список
-- `POST /api/employees` — создать (multipart/form-data + фото)
-- `PUT /api/employees/:id` — обновить
-- `DELETE /api/employees/:id` — удалить
-
-**Фото:** Sharp обработка → `uploads/employees/`
-
-#### Камеры
-- `GET /api/cameras` — список
-- `POST /api/cameras` — создать (пароль шифруется AES-256)
-- `PUT /api/cameras/:id` — обновить
-- `DELETE /api/cameras/:id` — удалить
-- `POST /api/cameras/:id/test` — тест подключения
-- `GET /api/cameras/:id/stream-url` → `{ mjpegUrl: "http://localhost:4000/streams/1.mjpg" }`
-
-#### Данные
-- `GET /api/presence` — присутствие
-- `GET /api/events` — история (фильтры + пагинация)
-- `GET /api/statistics` — статистика
-
-#### Компании (SUPERADMIN only)
-- `GET /api/companies`, `POST /api/companies`, `PUT /api/companies/:id`, `DELETE /api/companies/:id`
-
----
-
-### 2️⃣ Recognition Service → Backend
-
-#### Отправка событий распознавания
-
-`POST /api/events`
-
-```json
-{
-  "employeeId": 123,
-  "type": "IN",  // или "OUT"
-  "cameraId": 1,
-  "timestamp": "2024-12-17T10:30:00Z"
-}
-```
-
-**Обработка:**
-1. Проверка существования сотрудника
-2. Дедупликация (если то же событие < 60 сек назад → пропуск)
-3. Сохранение в БД
-4. WebSocket broadcast → Admin Frontend
-5. Возврат `{ ok: true }`
-
-#### Загрузка данных
-
-- `GET /api/employees` — список сотрудников с фото (для кэша лиц)
-- `GET /api/cameras/company/:slug` — список камер компании
-
----
-
-### 3️⃣ Backend → Camera Gateway
-
-#### Тест подключения к камере
-
-Admin → `POST /api/cameras/:id/test` → Backend:
-1. Расшифровывает пароль камеры (AES-256)
-2. Формирует RTSP URL: `rtsp://user:pass@ip:554/path`
-3. Отправляет в Camera Gateway: `POST /api/cameras/:id/preview`
-4. Возвращает результат Admin
-
-**Ответ:** `{ ok: true, latencyMs: 245 }`
-
----
-
-### 4️⃣ WebSocket (Backend → Admin)
-
-**События Socket.IO:**
-
-- `event:created` — новое событие распознавания
-- `employee:created` — новый сотрудник
-- `employee:updated` — обновление сотрудника
-
-**Обновляется в real-time:** Dashboard, Events, Presence
-
----
-
-## 📊 Диаграмма взаимодействия
-
-```
-                   ┌─────────────────┐
-                   │  Admin Frontend │ (порт 8080)
-                   └────────┬────────┘
-                            │
-                  REST API + WebSocket
-                            │
-                            ▼
-        ┌───────────────────────────────────────┐
-        │      Backend API (порт 3000)          │
-        │   Express + Prisma ORM + Socket.IO    │
-        │                                        │
-        │  • JWT Auth                            │
-        │  • Events (дедупликация)               │
-        │  • Employees (фото обработка)          │
-        │  • Cameras (AES-256 шифрование)        │
-        └────┬──────────┬──────────┬─────────────┘
-             │          │          │
-             │          │          │ POST /api/events
-             │          │          │ GET /api/employees
-             │          │          │
-             ▼          │          ▼
-     ┌──────────────┐  │  ┌──────────────────┐
-     │  PostgreSQL  │  │  │  Recognition     │
-     │   Database   │  │  │    Service       │
-     │ (порт 5432)  │  │  │   (Python)       │
-     └──────────────┘  │  └──────────────────┘
-                       │          │
-                       │          │ Читает RTSP
-                       │          │
-                       │          ▼
-                       │    [IP Камеры]
-                       │          │
-                       │          │ RTSP поток
-                       │          │
-                       ▼          ▼
-              ┌──────────────────────┐
-              │   Camera Gateway     │ (порт 4000)
-              │   RTSP → MJPEG       │
-              └──────────────────────┘
-                       │
-                       │ MJPEG streams
-                       ▼
-              Admin Frontend (просмотр видео)
-```
-
----
-
-## 📋 Требуемые сервисы
-
-| Сервис | Порт | Обязательный |
-|--------|------|--------------|
-| **PostgreSQL** | 5432 | ✅ Да |
-| **Camera Gateway** | 4000 | ⚠️ Для просмотра потоков |
-| **Recognition Service** | - | ⚠️ Для распознавания |
-
----
-
-*Документация актуальна на: декабрь 2025*
-
+Исходники: [регистрация маршрутов](https://github.com/aikeenaikeen/backend/blob/main/src/index.ts), [схема Prisma](https://github.com/aikeenaikeen/backend/blob/main/prisma/schema.prisma), [служебная авторизация](https://github.com/aikeenaikeen/backend/blob/main/src/middleware/serviceAuth.ts), [маршруты Recognition](https://github.com/aikeenaikeen/backend/blob/main/src/modules/recognition/recognition.routes.ts).

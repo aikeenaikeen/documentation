@@ -1,123 +1,26 @@
-# 📚 Camera Gateway — Документация
+# Camera Gateway
 
-## 🎯 Описание
+Актуализировано 2026-09-23 по `camera-gateway/src/` и конфигурации Compose.
 
-**Camera Gateway** — сервис для конвертации RTSP потоков с IP-камер в MJPEG формат для отображения в браузере.
+`camera-gateway` — Node.js + TypeScript + Express сервис на порту `4000`. Он читает настройки камеры через Prisma из PostgreSQL, расшифровывает RTSP credentials и через FFmpeg отдаёт браузеру и Recognition MJPEG. Распознавание использует переданный backend URL потока Gateway; утверждение, что оно всегда читает RTSP напрямую, устарело.
 
-## 🛠️ Технологический стек
+## API
 
-- **Node.js + TypeScript + Express**
-- **FFmpeg** — конвертация RTSP → MJPEG
-- **Prisma ORM** — чтение данных камер из PostgreSQL (read-only)
-- **AES-256** — расшифровка паролей камер
+| Метод и путь | Назначение |
+| --- | --- |
+| `GET /streams/:cameraId.mjpg` | MJPEG поток |
+| `GET /api/cameras`, `GET /api/cameras/:id` | Камеры и безопасные RTSP URL без пароля |
+| `POST /api/cameras/:id/preview` | Проверка получения кадра через FFmpeg |
+| `POST /api/streams/:id/reload` | Перезапуск активного потока после изменения камеры |
+| `GET /api/health` | Health check |
 
----
+Все маршруты, кроме health, требуют `CAMERA_GATEWAY_ACCESS_TOKEN` в query `token` либо заголовке `x-gateway-token`/`x-stream-token`. Backend выдаёт браузеру готовый `mjpegUrl` через `GET /api/cameras/:id/stream-url` и передаёт внутренний URL Recognition. Токен в URL является секретом: не публикуйте его в документации или логах.
 
-## 🔗 Взаимодействие с другими сервисами
+## Жизненный цикл потока
 
-### 1️⃣ Admin Frontend → Camera Gateway
+- По первому подключению Gateway запускает FFmpeg для камеры; несколько клиентов используют один поток.
+- После отключения последнего клиента процесс останавливается по `STREAM_IDLE_TIMEOUT_MS` (по умолчанию 15 секунд).
+- При сбое процесс переподключается с ограничением числа рестартов. Watchdog отслеживает поток с клиентами и перезапускает FFmpeg, если кадры перестали поступать.
+- Разрешение, FPS, JPEG quality, интервалы watchdog и таймауты задаются через env, а не являются фиксированным свойством сервиса.
 
-#### Получение MJPEG потока
-
-`GET /streams/:cameraId.mjpg`
-
-**Использование:**
-```html
-<img src="http://localhost:4000/streams/1.mjpg" />
-```
-
-**Ответ:** Бесконечный MJPEG stream (`multipart/x-mixed-replace`)
-
----
-
-### 2️⃣ Backend API → Camera Gateway
-
-#### Тест подключения к камере
-
-`POST /api/cameras/:id/preview`
-
-**Процесс:**
-1. Читает данные камеры из БД
-2. Расшифровывает пароль (AES-256)
-3. Пытается подключиться через FFmpeg
-4. Возвращает `{ ok: true/false, latencyMs }`
-
----
-
-### 3️⃣ Recognition Service → Camera Gateway
-
-❌ **Не используется** — Recognition Service читает RTSP напрямую с камер, а не через Gateway.
-
----
-
-### 4️⃣ Camera Gateway → IP Камеры (RTSP)
-
-#### Процесс конвертации RTSP → MJPEG
-
-1. Читает данные камеры из PostgreSQL (Prisma)
-2. Расшифровывает пароль (AES-256)
-3. Формирует RTSP URL: `rtsp://user:pass@ip:554/path`
-4. Запускает FFmpeg (RTSP → MJPEG, 1280x720, 10 FPS)
-5. Стримит клиентам (один FFmpeg на камеру)
-
-**StreamManager:**
-- Запуск при подключении клиента
-- Авто-остановка через 15 сек без клиентов
-
----
-
-## 📊 Диаграмма взаимодействия
-
-```
-┌─────────────────┐
-│  Admin Frontend │
-└────────┬────────┘
-         │
-         │ GET /streams/1.mjpg
-         │ (MJPEG поток)
-         │
-         ▼
-┌─────────────────────────────────────┐
-│    Camera Gateway (порт 4000)       │
-│                                     │
-│  ┌───────────────────────────────┐ │
-│  │     StreamManager             │ │
-│  │  • Управление FFmpeg          │ │
-│  │  • Один процесс на камеру     │ │
-│  │  • Авто-остановка (idle)      │ │
-│  └───────────────────────────────┘ │
-│                                     │
-│  ┌───────────────────────────────┐ │
-│  │   FFmpeg Process (per camera) │ │
-│  │   RTSP → MJPEG конвертация    │ │
-│  └───────────────────────────────┘ │
-└──────────┬──────────┬───────────────┘
-           │          │
-           │          │ Читает данные камер
-           │          ▼
-           │  ┌──────────────┐
-           │  │  PostgreSQL  │ (read-only)
-           │  │   Database   │
-           │  └──────────────┘
-           │
-           │ RTSP подключение
-           │ rtsp://user:pass@ip:554/path
-           │
-           ▼
-    [IP Камера 1]  [IP Камера 2]  [IP Камера N]
-    Hikvision      Dahua          ...
-```
-
----
-
-## 📋 Требуемые зависимости
-
-| Сервис | Обязательный |
-|--------|--------------|
-| **PostgreSQL** | ✅ Да |
-| **FFmpeg** | ✅ Да |
-
----
-
-*Документация актуальна на: декабрь 2025*
-
+Детали: [маршруты](https://github.com/aikeenaikeen/camera-gateway/blob/main/src/index.ts), [StreamManager](https://github.com/aikeenaikeen/camera-gateway/blob/main/src/services/streamManager.ts), [переменные](https://github.com/aikeenaikeen/camera-gateway/blob/main/ENV.md), [Backend API](BACKEND_DOCUMENTATION.md).

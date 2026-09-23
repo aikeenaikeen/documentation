@@ -1,155 +1,35 @@
-# 📚 Admin Frontend — Документация
+# Admin Frontend
 
-## 🎯 Описание
+Актуализировано 2026-09-23 по `admin/src/router/index.ts`, `admin/src/components/CameraStreamDialog.vue` и backend API.
 
-**Admin Frontend** — веб-интерфейс для управления системой распознавания лиц. Построен на Vue.js 3 + TypeScript.
+`admin` — Vue 3 + TypeScript SPA на Vite. Интерфейс использует Element Plus, Pinia, Axios, Vue Router, vue-i18n и Socket.IO client. В Compose контейнер слушает порт `8080`; при включённом профиле `prod` Nginx публикует UI на `80/443`.
 
-## 🛠️ Технологический стек
+## Страницы и доступ
 
-- **Vue.js 3** + TypeScript + Vite
-- **Element Plus** — UI компоненты
-- **Pinia** — State management
-- **Axios** — HTTP клиент
-- **Socket.IO Client** — Real-time обновления
+| Маршрут | Назначение | Доступ |
+| --- | --- | --- |
+| `/login` | Вход | Без авторизации |
+| `/dashboard` | Сводка | Авторизованные пользователи |
+| `/employees` | Сотрудники, фотографии и назначения | Авторизованные пользователи |
+| `/cameras` | Камеры, обычный и распознанный поток | Авторизованные пользователи |
+| `/presence` | Текущее присутствие | Авторизованные пользователи |
+| `/statistics` | События, интервалы активностей, evidence и статистика | Авторизованные пользователи |
+| `/labeling` | Разметка сохранённых клипов | `SUPERADMIN`, `COMPANY_ADMIN` |
+| `/companies`, `/users`, `/activities` | Управление компаниями, пользователями, активностями и обучением | `SUPERADMIN` |
 
----
+`/events` и `/employee-activities` перенаправляют на `/statistics`. Точные права на операции проверяет backend; наличие страницы само по себе не даёт права на запись.
 
-## 📁 Основные страницы
+## Связь с сервисами
 
-- `/login` — Авторизация
-- `/dashboard` — Дашборд со статистикой
-- `/employees` — Управление сотрудниками
-- `/cameras` — Управление камерами
-- `/presence` — Текущее присутствие
-- `/live` — Просмотр видео потоков
-- `/events` — История событий
-- `/statistics` — Статистика и отчеты
-- `/companies` — Управление компаниями (только SUPERADMIN)
+- REST API и Socket.IO идут через backend. `VITE_API_BASE_URL` задаёт адрес API; если он пуст, используется origin страницы. Axios добавляет Bearer access token и один раз обновляет его при `401`.
+- Обычный просмотр камеры: Admin запрашивает `GET /api/cameras/:id/stream-url`, получает `mjpegUrl` с токеном доступа и открывает MJPEG `/streams/:id.mjpg` через Camera Gateway.
+- Просмотр с распознаванием: `<img>` открывает единый endpoint Recognition `GET /video_feed?cameraId=:id`. Адрес берётся из `VITE_RECOGNITION_STREAM_URL` либо из origin страницы. Отдельных портов `5000 + cameraId` больше нет.
+- Статистика использует, среди прочего, `GET /api/activity-intervals`; сохранённые клипы и их кадры доступны через `/api/captures`. Обновления событий и интервалов приходят через Socket.IO.
 
----
+## Где смотреть детали
 
-## 🔐 Роли пользователей
-
-| Роль | Доступ |
-|------|--------|
-| **SUPERADMIN** | Все + управление компаниями |
-| **COMPANY_ADMIN** | Все в рамках своей компании |
-| **USER** | Только просмотр (read-only) |
-
----
-
-## 🔗 Взаимодействие с другими сервисами
-
-### 1️⃣ Backend API (порт 3000)
-
-**Базовый URL:** `http://localhost:3000`
-
-Admin Frontend взаимодействует с Backend через REST API:
-
-#### API эндпоинты
-
-**Аутентификация:**
-- `POST /api/auth/login` → JWT токены
-- `POST /api/auth/refresh` → обновление токена
-
-**CRUD операции:**
-- `/api/employees` — сотрудники (GET, POST, PUT, DELETE)
-- `/api/cameras` — камеры (GET, POST, PUT, DELETE)
-- `/api/companies` — компании (GET, POST, PUT, DELETE) — только SUPERADMIN
-
-**Данные:**
-- `GET /api/presence` — присутствие
-- `GET /api/events` — события (фильтры + пагинация)
-- `GET /api/statistics` — статистика
-
-**Особое:**
-- `POST /api/cameras/:id/test` — тест подключения
-- `GET /api/cameras/:id/stream-url` → URL MJPEG потока
-
-**Механизм:** Axios interceptors (авто-добавление токена, авто-refresh при 401)
-
----
-
-### 2️⃣ Camera Gateway (порт 4000)
-
-**Получение MJPEG потока:**
-
-1. Admin → Backend: `GET /api/cameras/:id/stream-url`
-2. Backend → Admin: `{ mjpegUrl: "http://localhost:4000/streams/1.mjpg" }`
-3. Admin отображает: `<img :src="mjpegUrl" />`
-
----
-
-### 3️⃣ Recognition Service (порт 5000+)
-
-**Поток с распознаванием:**
-
-Прямое подключение: `http://localhost:${5000 + cameraId}/video_feed`
-
-**Пример:**
-- Камера ID=1 → порт 5001
-- Камера ID=2 → порт 5002
-- Камера ID=3 → порт 5003
-
-**Отображение:** `<img :src="streamUrl" />`
-
----
-
-### 4️⃣ WebSocket (Backend → Admin)
-
-**Socket.IO события:**
-- `event:created` — новое событие распознавания
-- `employee:created` — новый сотрудник
-- `employee:updated` — обновление сотрудника
-
-**Обновляется в real-time:** Dashboard, Events, Presence
-
----
-
-## 📊 Диаграмма взаимодействия
-
-```
-┌─────────────────┐
-│  Admin Frontend │  (порт 8080)
-│   (Vue.js SPA)  │
-└────────┬────────┘
-         │
-         │ REST API + WebSocket
-         │
-         ▼
-┌─────────────────┐
-│   Backend API   │  (порт 3000)
-│   (Node.js)     │
-└────────┬────────┘
-         │
-         │ Управление данными (PostgreSQL)
-         │
-         ├──────────────────┬──────────────────┐
-         │                  │                  │
-         ▼                  ▼                  ▼
-┌────────────────┐  ┌──────────────┐  ┌─────────────────┐
-│ Camera Gateway │  │ Recognition  │  │    Database     │
-│  (порт 4000)   │  │   Service    │  │  (PostgreSQL)   │
-│                │  │ (порт 5000+) │  │                 │
-└────────────────┘  └──────────────┘  └─────────────────┘
-         │                  │
-         │                  │
-         ▼                  ▼
-    [IP Камеры]       [IP Камеры]
-    MJPEG поток     Поток + распознавание
-```
-
----
-
-## 📋 Требуемые сервисы для работы
-
-| Сервис | Порт | Обязательный | Назначение |
-|--------|------|--------------|------------|
-| **Backend API** | 3000 | ✅ Да | Основной API, БД, авторизация |
-| **Camera Gateway** | 4000 | ⚠️ Для просмотра потоков | Проксирование RTSP → MJPEG |
-| **Recognition Service** | 5000+ | ⚠️ Для распознавания | Видео + распознавание лиц |
-| **PostgreSQL** | 5432 | ✅ Да | База данных |
-
----
-
-*Документация актуальна на: декабрь 2025*
+- [Маршруты и guards](https://github.com/aikeenaikeen/admin/blob/main/src/router/index.ts)
+- [Клиент API](https://github.com/aikeenaikeen/admin/blob/main/src/api/client.ts)
+- [Просмотр камеры](https://github.com/aikeenaikeen/admin/blob/main/src/components/CameraStreamDialog.vue)
+- [Конфигурация Admin](https://github.com/aikeenaikeen/admin/blob/main/ENV.md)
+- [Backend API](BACKEND_DOCUMENTATION.md)
